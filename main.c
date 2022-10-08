@@ -41,6 +41,8 @@ typedef struct structSevenSegCnfg {
 /* USER CODE BEGIN PD */
 #define LO_FREQ_BUZZ 764
 #define HI_FREQ_BUZZ 270
+#define MAX_INTRVL_LO_FREQ 200
+#define MAX_INTRVL_HI_FREQ 400
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -56,11 +58,6 @@ uint8_t MSG[35] = {'\0'};
 // after each interval a message, with the uValDisp value,
 // is send over the serial interface
 static uint8_t cPeriod = 0;
-//static uint8_t cMsg = 0;
-//static bool bBtn1Pressed = false;
-//static bool bBtn1Pressed = false;
-//static bool bBtn2Pressed = false;
-//static bool bBtn3Pressed = false;
 static uint8_t uValDisp = 0;
 static uint8_t uNibble1 = 0;
 static uint8_t uNibble2 = 0;
@@ -90,12 +87,14 @@ const uint8_t SEVEN_SEG_DGT[16] = {
 		, 0xA1	//161 ~094 D
 		, 0x86	//134 ~121 E
 		, 0x8E	//142 ~113 F
+		// dp and uc/lc are not used so far
 		//, 0x7F	//127 ~128 dp
 		//, 0xFF	//255 ~000 uc/lc
 };
 static bool bAlternateBuzzPin = true;
 static uint16_t iFreqBuzz = 0;
 static uint16_t cIntervalBuzz = 0;
+static uint16_t uMaxIntrvlBuzz = 0;
 static bool bSetToZero = true;
 /* USER CODE END PV */
 
@@ -158,26 +157,23 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  //sprintf((char*)MSG, "uValDisp %d\r\n", uValDisp);
-	  //HAL_UART_Transmit(&huart2, MSG, sizeof(MSG), 100);
-	  //HAL_Delay(1000);
 	  // multiplex seven segment digits
 	  // A) shut off both seven segment displays
 	  HAL_GPIO_WritePin(GPIOA, CA1_Pin, GPIO_PIN_RESET);
 	  HAL_GPIO_WritePin(GPIOA, CA2_Pin, GPIO_PIN_RESET);
-	  // B) write to seven segment digit 1 and turn on momentarily
+	  // B1) write to seven segment digit 1 and turn on momentarily
 	  HAL_GPIO_WritePin(GPIOA, CA1_Pin, GPIO_PIN_SET);
 	  SEVEN_SEG_WriteDigit(uNibble1);
 	  HAL_Delay(1); // there has to be a slight delay
 	  HAL_GPIO_WritePin(GPIOA, CA1_Pin, GPIO_PIN_RESET);
-	  // B) write to seven segment digit 2 and turn on momentarily
+	  // B2) write to seven segment digit 2 and turn on momentarily
 	  HAL_GPIO_WritePin(GPIOA, CA2_Pin, GPIO_PIN_SET);
 	  SEVEN_SEG_WriteDigit(uNibble2);
 	  HAL_Delay(1); // there has to be a slight delay
 	  HAL_GPIO_WritePin(GPIOA, CA2_Pin, GPIO_PIN_RESET);
-    /* USER CODE END WHILE */
+	  /* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
+	  /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
@@ -251,14 +247,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	if (htim->Instance == htim2.Instance)
 	{
 	// A)
-	// test button 1 and check if uValDisp is in range
+	// test button 1
 	if (!HAL_GPIO_ReadPin(GPIOA, BTN1_Pin))
-	//if (!HAL_GPIO_ReadPin(GPIOA, BTN1_Pin) && uValDisp > 0)
 	{
+		// check if uValDisp is at zero
 		if (uValDisp == 0)
 		{
 			HAL_TIM_Base_Stop_IT(&htim3);
 			cIntervalBuzz = 0;
+			uMaxIntrvlBuzz = MAX_INTRVL_LO_FREQ;
 			// configure TIM3
 			htim3.Instance->ARR = iFreqBuzz = LO_FREQ_BUZZ;
 			// start TIM3 to generate frequency for buzzer
@@ -269,14 +266,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 			--uValDisp;
 		}
 	}
-	// test button 2 and check if uValDisp is in range
+	// test button 2
 	if (!HAL_GPIO_ReadPin(GPIOA, BTN2_Pin))
-	//if (!HAL_GPIO_ReadPin(GPIOA, BTN2_Pin) && uValDisp < 0xFF)
 	{
+		// check if uValDisp is at full range
 		if (uValDisp == 0xFF)
 		{
 			HAL_TIM_Base_Stop_IT(&htim3);
 			cIntervalBuzz = 0;
+			uMaxIntrvlBuzz = MAX_INTRVL_HI_FREQ;
 			// configure TIM3
 			htim3.Instance->ARR = iFreqBuzz = HI_FREQ_BUZZ;
 			// start TIM3 to generate frequency for buzzer
@@ -319,7 +317,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim)
 	// handle callback from TIM3
 	if (htim->Instance == htim3.Instance)
 	{
-		if ((++cIntervalBuzz) == 200)
+		if ((++cIntervalBuzz) == uMaxIntrvlBuzz)
 		{
 			HAL_TIM_Base_Stop_IT(&htim3);
 			return;
