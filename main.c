@@ -21,26 +21,17 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdbool.h>
+#include <string.h>
 #include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef struct tagDATA_PACKET
-{
-	uint8_t edge;
-	uint32_t uFallingEdge;
-	uint32_t uRisingEdge;
-	int32_t bitTiming;
-} DATA_PACKET;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BUFFER_MAX	128
-#define NOF_EDGE	74
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,26 +40,22 @@ typedef struct tagDATA_PACKET
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-TIM_HandleTypeDef htim2;
+I2C_HandleTypeDef hi2c1;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-__IO static uint8_t cEdge = 0;
-__IO static DATA_PACKET data_packet[NOF_EDGE] = {0};
-uint8_t MSG[BUFFER_MAX] = {'\0'};
-uint8_t cFrameReceived = 0;
-__IO static uint64_t frame = 0;
+static const uint8_t TMP102_ADDR = 0x48 << 1;
+static const uint8_t REG_TEMP = 0x00;
+/* USER CODE END PV */
+
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_TIM2_Init(void);
+static void MX_I2C1_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-static void clear_buffer();
-static void evaluate();
-static void writeBit(const uint8_t bit);
-static void decode(const uint64_t frame);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -83,7 +70,10 @@ static void decode(const uint64_t frame);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-
+	HAL_StatusTypeDef ret;
+	uint8_t buf[12];
+	int16_t val;	// raw temperature value
+	float temp_c;	// temperature value convert to degrees Celcius
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -104,12 +94,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_TIM2_Init();
+  MX_I2C1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  // start both channels on TIM2
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
-  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_2);
 
   /* USER CODE END 2 */
 
@@ -117,26 +104,48 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  if (cEdge == NOF_EDGE)
+	  // tell TMP102 that we want to read from the temperature register
+	  buf[0] = REG_TEMP;
+	  ret = HAL_I2C_Master_Transmit(&hi2c1, TMP102_ADDR, buf, 1, HAL_MAX_DELAY);
+	  if (ret != HAL_OK)
 	  {
-		  // stop both channels on TIM2
-		  HAL_TIM_IC_Stop_IT(&htim2, TIM_CHANNEL_1);
-		  HAL_TIM_IC_Stop_IT(&htim2, TIM_CHANNEL_2);
-		  // clear message buffer
-		  clear_buffer();
-		  sprintf((char*)MSG, "%3d Frame received\r\n", ++cFrameReceived);
-		  HAL_UART_Transmit(&huart2, MSG, sizeof(MSG), 100);
-		  // essential to get it working!!!
-		  // (concurrency or, it might be that UART2 is using TIM2...)
-		  HAL_Delay(50);
-		  evaluate();
-		  // default state
-		  cEdge = 0;
-		  frame = 0;
-		  // start both channels on TIM2
-		  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1);
-		  HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_2);
+		  strcpy((char*)buf, "Error Tx\r\n");
 	  }
+	  else
+	  {
+		  // read 2 bytes from the temperature register
+		  ret = HAL_I2C_Master_Receive(&hi2c1, TMP102_ADDR, buf, 2, HAL_MAX_DELAY);
+		  if (ret != HAL_OK)
+		  {
+			  strcpy((char*)buf, "Error Rx\r\n");
+		  }
+		  else
+		  {
+			  // combine the bytes
+			  val = ((int16_t)buf[0] << 4 | buf[1] >> 4);
+		  }
+		  // convert to 2's complement, since temperatur can be negative
+		  if (val > 0x7FF)
+		  {
+			  val |= 0xF000;
+		  }
+		  // convert to float temperature value (Celcius)
+		  temp_c = val * 0.0625;
+		  // convert temperature to decimal format
+		  temp_c *= 100;
+		  sprintf((char*)buf
+				  , "%u.%02u C\r\n"
+				  , ((unsigned int)temp_c / 100)
+				  , ((unsigned int)temp_c % 100)
+				  );
+	  }
+	  // no longer needed
+	  //strcpy((char*)buf, "Hello!\r\n");
+	  //HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
+	  //HAL_Delay(500);
+	  // send out buffer (temperature or error message)
+	  HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
+	  HAL_Delay(500);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -167,13 +176,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_MSI;
-  RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 40;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
-  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
-  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -183,88 +186,62 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
 /**
-  * @brief TIM2 Initialization Function
+  * @brief I2C1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+static void MX_I2C1_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* USER CODE BEGIN I2C1_Init 0 */
 
-  /* USER CODE END TIM2_Init 0 */
+  /* USER CODE END I2C1_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_SlaveConfigTypeDef sSlaveConfig = {0};
-  TIM_IC_InitTypeDef sConfigIC = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  /* USER CODE BEGIN I2C1_Init 1 */
 
-  /* USER CODE BEGIN TIM2_Init 1 */
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x00000E14;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 80 - 1;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 0xFFFFFFFF - 1;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
   {
     Error_Handler();
   }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sSlaveConfig.SlaveMode = TIM_SLAVEMODE_RESET;
-  sSlaveConfig.InputTrigger = TIM_TS_TI1FP1;
-  sSlaveConfig.TriggerPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
-  sSlaveConfig.TriggerPrescaler = TIM_ICPSC_DIV1;
-  sSlaveConfig.TriggerFilter = 0;
-  if (HAL_TIM_SlaveConfigSynchro(&htim2, &sSlaveConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
-  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
-  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 0;
-  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
-  sConfigIC.ICSelection = TIM_ICSELECTION_INDIRECTTI;
-  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_ENABLE;//DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -310,282 +287,15 @@ static void MX_USART2_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PA10 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
 }
 
 /* USER CODE BEGIN 4 */
-//****************************************************************************
-//*                     HAL_TIM_IC_CaptureCallback
-//****************************************************************************
-void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim)
-{
-	// channel_1 interrupt, falling edge
-	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
-	{
-		// just checking
-		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_RESET);
-		data_packet[cEdge].edge = 0;
-		data_packet[cEdge].uFallingEdge =
-				HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-		data_packet[cEdge].uRisingEdge = 0;
-		++cEdge;
-	}
-	// channel_2 interrupt, rising edge
-	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2)
-	{
-		// just checking
-		HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, GPIO_PIN_SET);
-		data_packet[cEdge].edge = 1;
-		data_packet[cEdge].uFallingEdge = 0;
-				HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-		data_packet[cEdge].uRisingEdge =
-				HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2);
-		++cEdge;
-	}
-}
-//****************************************************************************
-//*                     clear_buffer
-//****************************************************************************
-static void clear_buffer()
-{
-	for (uint8_t i = 0; i < BUFFER_MAX; i++) MSG[i] = '\0';
-}
-//****************************************************************************
-//*                     evaluate
-//****************************************************************************
-static void evaluate()
-{
-	char sEdgeDirectionMessage[2][8] = {{'F','A','L','L','I','N','G','\0'}
-			, {'R','I','S','I','N','G','\0'}
-	};
-	uint8_t cError = 0;
-	uint8_t cEdge = 0;
-	bool bEdge = false;
-	uint8_t last_bit = 0;
-	for (uint8_t i = 0; i < 36; i++)
-	{
-		// clear message buffer
-		clear_buffer();
-		if ((bool)data_packet[i].edge != bEdge)
-		{
-			sprintf((char*)MSG, "Error %3d: edge %2d is NOT %s\r\n", ++cError
-					, cEdge++
-					, sEdgeDirectionMessage[i % 2]);
-			HAL_UART_Transmit(&huart2, MSG, sizeof(MSG), 100);
-			return;
-		}
-		if (i >= 1)
-		{
-			last_bit = frame & 1;
-			if (i % 2 == 0)
-			{
-				data_packet[i].bitTiming = data_packet[i - 1].uRisingEdge -
-						data_packet[i].uFallingEdge;
-				if (last_bit == 0 && (data_packet[i].uFallingEdge > 0
-						&& data_packet[i].uFallingEdge < 450))
-				{
-					writeBit(0);
-				}
-				else
-				{
-					writeBit(1);
-				}
-			}
-			else
-			{
-				data_packet[i].bitTiming = data_packet[i - 1].uFallingEdge -
-						data_packet[i].uRisingEdge;
-				if (last_bit == 1 && (data_packet[i].uRisingEdge > 0
-						&& data_packet[i].uRisingEdge < 450))
-				{
-					writeBit(1);
-				}
-				else
-				{
-					writeBit(0);
-				}
-			}
-		}
-		bEdge = !bEdge;
-	}
-	decode(frame);
-}
-//****************************************************************************
-//*                     writeBit
-//****************************************************************************
-static void writeBit(const uint8_t bit)
-{
-	frame <<= 1;
-	frame |= bit;
-}
-//****************************************************************************
-//*                     decode
-//****************************************************************************
-static void decode(const uint64_t frame)
-{
-	uint8_t i = 0;
-	char aKey[34][14] = {{'\'','1','\'','\0'}
-	, {'\'','2','\'','\0'}
-	, {'\'','3','\'','\0'}
-	, {'\'','4','\'','\0'}
-	, {'\'','5','\'','\0'}
-	, {'\'','6','\'','\0'}
-	, {'\'','7','\'','\0'}
-	, {'\'','8','\'','\0'}
-	, {'\'','9','\'','\0'}
-	, {'\'','0','\'','\0'}
-	, {'\'','A','.','.','Z','/','1','.','.','0','\'','\0'}
-	, {'\'','P','+','\'','\0'}
-	, {'\'','P','-','\'','\0'}
-	, {'\'','g','i','d','s','\'','\0'}
-	, {'\'','r','a','d','i','o','\'','\0'}
-	, {'\'','t','e','r','u','g','/','?','\'','\0'}
-	, {'\'','m','e','n','u','\'','\0'}
-	, {'\'','t','v',' ','t','h','u','i','s','\'','\0'}
-	, {'\'','o','m','l','a','a','g','\'','\0'}
-	, {'\'','l','i','n','k','s','\'','\0'}
-	, {'\'','r','e','c','h','t','s','\'','\0'}
-	, {'\'','o','m','h','o','o','g','\'','\0'}
-	, {'\'','r','o','o','d','\'','\0'}
-	, {'\'','g','r','o','e','n','\'','\0'}
-	, {'\'','g','e','e','l','\'','\0'}
-	, {'\'','b','l','a','u','w','\'','\0'}
-	, {'\'','s','t','o','p','\'','\0'}
-	, {'\'','o','p','n','e','m','e','n','\'','\0'}
-	, {'\'','t','e','r','u','g','\'','\0'}
-	, {'\'','p','a','u','z','e','/','s','p','e','l','e','n','\0'}
-	, {'\'','v','o','o','r','u','i','t','\0'}
-	, {'\'','i','-','t','v','\0'}
-	, {'\'','O','K','\'','\0'}
-	, {'I','N','V','A','L','I','D','\0'}
-	};
-	switch (frame)
-	{
-	case 0x2EBFFFFFE: //'1'
-		i = 0;
-		break;
-	case 0x2EBFFFFFA: //'2'
-		i = 1;
-		break;
-	case 0x2EBFFFFFB: //'3'
-		i = 2;
-		break;
-	case 0x2EBFFFFEE: //'4'
-		i = 3;
-		break;
-	case 0x2EBFFFFEB: //'5'
-		i = 4;
-		break;
-//	case 0x2EBFFFFEE: //'6' is the same as 4 ???
-//		i = 5;
-//		break;
-	case 0x2EBFFFFEF: //'7'
-		i = 6;
-		break;
-	case 0x2EBFFFFBE: //'8'
-		i = 7;
-		break;
-	case 0x2EBFFFFBB: //'9'
-		i = 8;
-		break;
-	case 0x2EBFFFFAB: //'0'
-		i = 9;
-		break;
-//	case 0x2EBFFFFAB: //'A..Z/1..0' is the same as '0' ???
-//		i = 10;
-//		break;
-	case 0x2EBFFFEFB: //'P+'
-		i = 11;
-		break;
-	case 0x2EBFFFEFE: //'P-'
-		i = 12;
-		break;
-	case 0x2EBFFFEBB: //'gids'
-		i = 13;
-		break;
-	case 0x2EBFFFABF: //'radio'
-		i = 14;
-		break;
-	case 0x2EBFFFEEF: //'terug/?' is the same as gids ???
-		i = 15;
-		break;
-	case 0x2EBFFFAEF: //'menu'
-		i = 16;
-		break;
-//	case 0x2EBFFFEBB: //'tv thuis' is the same as gids ???
-//		i = 17;
-//		break;
-//	case 0x2EBFFFFBB: //'omlaag' is the same as 9 ???
-//		i = 18;
-//		break;
-//	case 0x2EBFFFFBE: //'links' is the same as 8 ???
-//		i = 19;
-//		break;
-//	case 0x2EBFFFEFE: //'rechts' is the same as P- ???
-//		i = 20;
-//		break;
-//	case 0x2EBFFFFBE: //'omhoog' is the same as 8 ???
-//		i = 21;
-//		break;
-//	case 0x2EBFFFEFB: //'rood' is the same as P+ ???
-//		i = 22;
-//		break;
-//	case 0x2EBFFFEFE: //'groen' is the same as P- ???
-//		i = 23;
-//		break;
-	case 0x2EBFFFEFF: //'geel'
-		i = 24;
-		break;
-	case 0x2EBFFFBFE: //'blauw'
-		i = 25;
-		break;
-	case 0x2EBFFFBEB: //'stop'
-		i = 26;
-		break;
-	case 0x2EBFFFBEF: //'opnemen'
-		i = 27;
-		break;
-	case 0x2EBFFFBFB: //'terug'
-		i = 28;
-		break;
-//	case 0x2EBFFFEEF: //'pauze/spelen' is the same as 'terug/?' ???
-//		i = 29;
-//		break;
-	case 0x2EBFFFBBB: //'vooruit'
-		i = 30;
-		break;
-	case 0x2EBFFFFAF: //'i-tv'
-		i = 31;
-		break;
-	case 0x2EBFFFFBF: //'OK'
-		i = 32;
-		break;
-	default: //INVALID
-		i = 33;
-		break;
-	}
-	sprintf((char*)MSG, "No error. Key is: %s\r\n"
-			, aKey[i]);
-	HAL_UART_Transmit(&huart2, MSG, sizeof(MSG), 100);
-	// essential to get it working!!!
-	  // (concurrency or, it might be that UART2 is using TIM2...)
-	HAL_Delay(50);
-}
+
 /* USER CODE END 4 */
 
 /**
